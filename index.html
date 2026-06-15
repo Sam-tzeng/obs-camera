@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>區網相機直播至 OBS (WebRTC)</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; text-align: center; background: #1a1a1a; color: #fff; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; background: #2a2a2a; border-radius: 10px; }
+        video { width: 100%; max-height: 400px; background: #bb6161; border-radius: 8px; margin-top: 10px; transform: scaleX(-1); }
+        .btn { display: inline-block; padding: 12px 24px; background: #00b359; color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; margin: 10px 0; }
+        .btn:disabled { background: #555; }
+        .url-box { background: #333; padding: 10px; border-radius: 5px; word-break: break-all; margin: 10px 0; font-family: monospace; }
+        .hidden { display: none; }
+        .status { color: #ffcc00; margin: 10px 0; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>區網相機串流系統</h2>
+    <div id="status" class="status">正在初始化...</div>
+
+    <div id="sender-ui" class="hidden">
+        <p>📱 這是【手機傳送端】</p>
+        <button id="start-btn" class="btn">開啟相機並傳送</button>
+        <video id="local-video" autoplay playsinline muted></video>
+    </div>
+
+    <div id="receiver-ui" class="hidden">
+        <p>💻 這是【OBS 接收端】</p>
+        <p>請將此網頁網址直接複製到 OBS 的「瀏覽器來源」中</p>
+        <video id="remote-video" autoplay playsinline></video>
+    </div>
+</div>
+
+<script>
+// 使用公開的 MQTT 伺服器進行 P2P 握手 (僅傳送連線資訊，不傳送畫面)
+const SIGNAL_SERVER = 'wss://broker.emqx.io:8084/mqtt';
+const ROOM_ID = "obs_lan_cam_12345"; // 如果同時有其他人用，請修改此 ID 避免衝突
+const pcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+let client, pc;
+const statusDiv = document.getElementById('status');
+
+// 偵測是 OBS 還是普通手機瀏覽器
+// OBS 的 User Agent 通常包含 OBS 或可以使用網址參數區隔
+const urlParams = new URLSearchParams(window.location.search);
+const isReceiver = urlParams.has('obs') || navigator.userAgent.includes('OBS');
+
+if (isReceiver) {
+    document.getElementById('receiver-ui').classList.remove('hidden');
+    initReceiver();
+} else {
+    document.getElementById('sender-ui').classList.remove('hidden');
+    initSender();
+}
+
+// 初始化 MQTT 連線
+function initMQTT(onMessageCallback) {
+    client = mqtt.connect(SIGNAL_SERVER);
+    client.on('connect', () => {
+        statusDiv.innerText = isReceiver ? "🟢 接收端已就緒，等待手機連線..." : "🟢 傳送端已就緒，請點擊下方按鈕";
+        client.subscribe(ROOM_ID);
+    });
+    client.on('message', (topic, message) => {
+        const data = JSON.parse(message.toString());
+        onMessageCallback(data);
+    });
+}
+
+// ================= 📱 手機傳送端邏輯 =================
+function initSender() {
+    initMQTT(async (data) => {
+        if (data.type === 'answer' && pc) {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        } else if (data.type === 'candidate' && pc) {
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        }
+    });
+
+    document.getElementById('start-btn').addEventListener('click', async () => {
+        try {
+            statusDiv.innerText = "正在獲取相機權限...";
+            // 請求後置鏡頭，並設定 1080p 高畫質
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: { ideal: "environment" }, width: 1920, height: 1080 },
+                audio: true
+            });
+            
+            document.getElementById('local-video').srcObject = stream;
+            document.getElementById('start-btn').disabled = true;
+            statusDiv.innerText = "⚡ 正在建立 WebRTC 連線...";
+
+            pc = new RTCPeerConnection(pcConfig);
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    client.publish(ROOM_ID, JSON.stringify({ type: 'candidate', sender: 'phone', candidate: event.candidate }));
+                }
+            };
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            
+            client.publish(ROOM_ID, JSON.stringify({ type: 'offer', sdp: offer }));
+            statusDiv.innerText = "📡 畫面傳送中！請確認 OBS 已開啟該網頁。";
+        } catch (err) {
+            statusDiv.innerText = "❌ 錯誤: " + err.message;
+        }
+    });
+}
+
+// ================= 💻 OBS 接收端邏輯 =================
+function initReceiver() {
+    initMQTT(async (data) => {
+        if (data.type === 'offer') {
+            statusDiv.innerText = "⚡ 收到手機連線請求，正在建立通道...";
+            pc = new RTCPeerConnection(pcConfig);
+            
+            pc.ontrack = (event) => {
+                document.getElementById('remote-video').srcObject = event.streams[0];
+                statusDiv.innerText = "🟢 畫面同步成功！";
+            };
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    client.publish(ROOM_ID, JSON.stringify({ type: 'candidate', sender: 'obs', candidate: event.candidate }));
+                }
+            };
+
+            await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            
+            client.publish(ROOM_ID, JSON.stringify({ type: 'answer', sdp: answer }));
+        } else if (data.type === 'candidate' && data.sender === 'phone' && pc) {
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        }
+    });
+}
+</script>
+</body>
+</html>
