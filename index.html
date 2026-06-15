@@ -121,8 +121,11 @@ mirrorSwitch.addEventListener('change', (e) => {
 function initSender() {
     // 建立 Peer 節點，讓 PeerJS 隨機分配一個簡短的 ID
     peer = new Peer({
-        config: { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }] }
-    });
+    host: 'peerjs.com',
+    secure: true,
+    port: 443,
+    config: { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }] }
+});
 
     peer.on('open', (id) => {
         document.getElementById('peer-id-display').innerText = id;
@@ -174,8 +177,11 @@ function initSender() {
 // ================= 💻 OBS 接收端邏輯 =================
 function initReceiver(id) {
     peer = new Peer({
-        config: { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }] }
-    });
+    host: 'peerjs.com',
+    secure: true,
+    port: 443,
+    config: { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }] }
+});
 
     peer.on('open', () => {
         // 主動向手機端發起連線（呼叫）
